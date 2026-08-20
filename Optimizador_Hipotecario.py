@@ -424,7 +424,7 @@ if "resultado" in st.session_state:
         return _COLORES.get(val, "text-align: center")
 
     st.dataframe(
-        df_mejor_tabla.style.applymap(_colorear),
+        df_mejor_tabla.style.map(_colorear),
         use_container_width=True,
     )
 
