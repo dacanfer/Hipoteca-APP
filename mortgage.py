@@ -8,6 +8,24 @@ Usa el sistema de amortización francés (cuota constante) con numpy_financial.p
 import numpy_financial as npf
 
 
+def calcular_capital_hipotecario(
+    precio: float,
+    pct_financiacion: float,
+    ahorros_disponibles: float,
+    impuestos: float,
+    gastos_compra: float,
+) -> tuple[float, float]:
+    """Return mortgage principal and minimum savings needed for the purchase."""
+    capital_base = round(precio * pct_financiacion / 100, 2)
+    entrada_minima = precio - capital_base
+    ahorros_minimos = round(entrada_minima + impuestos + gastos_compra, 2)
+
+    # Upfront costs are covered first; only savings beyond them pay down the loan.
+    ahorro_extra = max(0.0, ahorros_disponibles - ahorros_minimos)
+    capital = max(0.0, capital_base - ahorro_extra)
+    return round(capital, 2), ahorros_minimos
+
+
 def calcular_cuota_mensual(capital: float, anios: int, tipo_anual: float) -> float:
     """
     Calcula la cuota mensual de una hipoteca mediante el sistema francés.

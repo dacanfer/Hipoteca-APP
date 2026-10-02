@@ -19,6 +19,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent))
 
 from optimizer import optimizar
+from mortgage import calcular_capital_hipotecario
 from utils import (
     CONFIG_DEFAULT,
     PRODUCTOS_DEFAULT,
@@ -110,10 +111,6 @@ with st.sidebar:
         help="Porcentaje del precio que financiará el banco. El resto sale de tus ahorros.",
     )
 
-    # Capital prestado calculado automáticamente
-    capital = round(precio_inmueble * pct_financiacion / 100, 2)
-    st.info(f"**Capital hipotecario:** {capital:,.0f} €")
-
     st.divider()
 
     # ── Gastos e impuestos ────────────────────────────────────────────────────
@@ -153,6 +150,15 @@ with st.sidebar:
         format="%.0f",
         help="Dinero en cuenta que destinarás a la entrada, impuestos y gastos.",
     )
+
+    capital, ahorros_minimos = calcular_capital_hipotecario(
+        precio_inmueble,
+        pct_financiacion,
+        ahorros_banco,
+        impuestos,
+        gastos_hipoteca,
+    )
+    st.info(f"**Capital hipotecario:** {capital:,.0f} €")
 
     st.divider()
 
@@ -240,23 +246,23 @@ st.caption(
 
 # ── Resumen financiero de la operación ───────────────────────────────────────
 
-aportacion_necesaria = precio_inmueble - capital          # lo que pones tú del precio
-total_ahorros_necesarios = aportacion_necesaria + impuestos + gastos_hipoteca
-saldo_restante = ahorros_banco - total_ahorros_necesarios
+aportacion_necesaria = precio_inmueble - capital
+total_ahorros_necesarios = ahorros_minimos
+saldo_restante = ahorros_banco - ahorros_minimos
 
 with st.expander("💰 Resumen financiero de la operación", expanded=True):
     c1, c2, c3 = st.columns(3)
     with c1:
         st.metric("Precio del inmueble", f"{precio_inmueble:,.0f} €")
         st.metric("Capital hipotecario", f"{capital:,.0f} €",
-                  help=f"{pct_financiacion:.1f}% del precio")
+                  help=f"{capital / precio_inmueble * 100:.1f}% del precio")
         st.metric("Aportación propia (entrada)", f"{aportacion_necesaria:,.0f} €",
-                  help=f"{100 - pct_financiacion:.1f}% del precio")
+                  help="Precio del inmueble menos el capital hipotecario")
     with c2:
         st.metric("Impuestos previstos", f"{impuestos:,.0f} €")
         st.metric("Gastos de hipoteca", f"{gastos_hipoteca:,.0f} €")
         st.metric("Total ahorros necesarios", f"{total_ahorros_necesarios:,.0f} €",
-                  help="Entrada + Impuestos + Gastos")
+                  help="Entrada mínima según financiación + impuestos + gastos")
     with c3:
         st.metric("Ahorros disponibles", f"{ahorros_banco:,.0f} €")
         delta_label = f"{abs(saldo_restante):,.0f} € {'sobrantes' if saldo_restante >= 0 else 'faltan'}"
@@ -281,23 +287,33 @@ st.divider()
 
 # ── Tabla editable de productos ───────────────────────────────────────────────
 
+def _marcar_productos_editados():
+    st.session_state["productos_editados"] = True
+
+
 st.subheader("📋 Productos vinculados")
 st.markdown(
     "Edita la tabla con los productos ofrecidos por el banco. "
     "Puedes añadir o eliminar filas con los botones de la parte inferior de la tabla."
 )
 
+productos_para_editar = st.session_state["productos_df"].copy(deep=True)
+productos_para_editar["bonificacion"] = pd.to_numeric(
+    productos_para_editar["bonificacion"]
+).map(lambda valor: f"{valor:.2f}")
+
 productos_df = st.data_editor(
-    st.session_state["productos_df"],
+    productos_para_editar,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
         "nombre": st.column_config.TextColumn(
             "Producto", help="Nombre del producto financiero", required=True
         ),
-        "bonificacion": st.column_config.NumberColumn(
-            "Bonificación (%)", help="Reducción sobre el tipo base si se contrata con banco",
-            min_value=0.0, max_value=5.0, step=0.05, format="%.2f", required=True
+        "bonificacion": st.column_config.TextColumn(
+            "Bonificación (%)",
+            help="Escribe un valor entre 0 y 5; se acepta punto o coma decimal.",
+            required=True,
         ),
         "coste_banco": st.column_config.NumberColumn(
             "Coste banco (€/mes)", help="Coste mensual si se contrata con el banco",
@@ -314,11 +330,21 @@ productos_df = st.data_editor(
             default=False,
         ),
     },
-    key="tabla_productos",
+    key="tabla_productos_decimal",
+    on_change=_marcar_productos_editados,
 )
 
-# Guardar en sesión los cambios
-st.session_state["productos_df"] = productos_df
+# Parse both decimal separators before passing bonus values to the optimizer.
+bonificacion_texto = productos_df["bonificacion"].astype(str).str.strip().str.replace(",", ".", regex=False)
+bonificacion_numero = pd.to_numeric(bonificacion_texto, errors="coerce")
+bonificacion_invalida = bonificacion_numero.isna() | ~bonificacion_numero.between(0, 5)
+if bonificacion_invalida.any():
+    st.error("Las bonificaciones deben ser números entre 0 y 5; puedes usar punto o coma decimal.")
+    st.stop()
+productos_df["bonificacion"] = bonificacion_numero.astype(float)
+
+# Keep a fresh dataframe snapshot so table edits are reflected in this rerun.
+st.session_state["productos_df"] = productos_df.copy(deep=True)
 
 st.divider()
 
@@ -338,7 +364,16 @@ firma_actual = json.dumps(
     default=str,
 )
 
-if calcular:
+# Existing results are recalculated automatically whenever an input signature changes.
+recalcular_resultado = calcular or (
+    st.session_state.get("productos_editados", False)
+    or (
+        "resultado" in st.session_state
+        and st.session_state.get("resultado_firma") != firma_actual
+    )
+)
+
+if recalcular_resultado:
     # Validaciones básicas
     if productos_df is None or len(productos_df) == 0:
         st.warning("Añade al menos un producto para poder calcular.")
@@ -362,6 +397,7 @@ if calcular:
     # Guardar resultado y la firma de los inputs usados para generarlo
     st.session_state["resultado"] = df_resultado
     st.session_state["resultado_firma"] = firma_actual
+    st.session_state["productos_editados"] = False
 
 # ── Mostrar resultados si existen ─────────────────────────────────────────────
 
